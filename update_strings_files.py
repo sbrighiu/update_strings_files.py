@@ -357,7 +357,6 @@ def localize_code(path, customPath, routine, development_language_folder):
                     os.rename(original, old)
                     os.system('genstrings -q -s "%s" -o "%s" `find "%s" -name "*.swift" -o -name "*.m"`' % (routine, language, path))
                     os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
-                    os.remove(original)
                     merge(merged, old, new, development_language)
                 except:
                     print('Failed to create new/merge into Localizable.strings file')
@@ -413,7 +412,6 @@ def localize_interface(path, custom_path, development_language_folder):
                     os.rename(original, old)
                     os.system('ibtool --export-strings-file "%s" "%s"' % (original, ib_file_path))
                     os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
-                    os.remove(original)
                     merge(merged, old, new, current_language)
                 else:
                     os.system('ibtool --export-strings-file "%s" "%s"' % (original, ib_file_path))
