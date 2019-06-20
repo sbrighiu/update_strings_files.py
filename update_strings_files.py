@@ -101,6 +101,12 @@
 # - To change the development language, use -dev="ja" (Japanese).
 # - If the script does not have rights to be executed, run command `chmod +x update_strings_files.py`.
 
+# Version 1.0
+# - If a .lproj folder exists for Localizable.strings, running the script will now always generate an empty file
+#   This eliminates mismatch with xcodeproj when Localizable.strings files are referenced inside the project but
+#   are deleted by the script. This blocks the build phase from being run (Reason: project structure is invalid).
+# - Fix crashes/edge cases when adding or removing strings onto/from an empty or inexistent Localizable.strings file.
+
 
 from sys import argv
 from codecs import open
@@ -147,11 +153,17 @@ class LocalizedFile():
             f = open(fname, encoding='utf_8', mode='r')
         except:
             print('File %s does not exist.' % fname)
+            f.close()
             exit(-1)
 
         found_one = 0
 
-        line = f.readline()
+        line = None
+        try:
+            line = f.readline()
+        except:
+            f.close()
+
         while line:
             comments = [line]
 
@@ -319,7 +331,11 @@ class LocalizedFile():
 
 
 def merge(merged_fname, old_fname, new_fname, development_language_folder):
-    old = LocalizedFile(old_fname, auto_read=True)
+    try:
+        old = LocalizedFile(old_fname, auto_read=True)
+    except:
+        pass
+
     new = LocalizedFile(new_fname, auto_read=True)
     merged = old.merge_with(new, merged_fname, development_language_folder)
     merged.save_to_file(merged_fname)
@@ -343,6 +359,7 @@ def localize_code(path, customPath, routine, development_language_folder):
             original = merged = os.path.join(language, STRINGS_FILE)
             old = original + '.old'
             new = original + '.new'
+            invalid = original + '.invalid'
 
             print('  - ' + STRINGS_FILE)
 
@@ -352,19 +369,42 @@ def localize_code(path, customPath, routine, development_language_folder):
             if os.path.isfile(new):
                 os.remove(new)
 
+            gen_strings_command = 'find "%s" -type f -name "*.swift" -print0 -or -name "*.m" -print0' \
+                                  ' | tr "\n" "\t" | xargs -0 xcrun extractLocStrings -q -s "%s" -o "%s"' % (path, routine, language)
             if os.path.isfile(original):
-                try:
+                file_type = os.popen('file -b --mime-encoding "%s"' % original).read()
+                if file_type.startswith('us-ascii') or file_type.startswith('utf'):
                     os.rename(original, old)
-                    os.system('genstrings -q -s "%s" -o "%s" `find "%s" -name "*.swift" -o -name "*.m"`' % (routine, language, path))
+                else:
+                    if os.stat(original).st_size == 0:
+                        os.remove(original)
+                    else:
+                        os.rename(original, invalid)
+
+                os.system(gen_strings_command)
+
+                if os.path.isfile(original):
                     os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
+                else:
+                    open(new, 'w')
+
+                if os.path.isfile(old):
                     merge(merged, old, new, development_language)
-                except:
-                    print('Failed to create new/merge into Localizable.strings file')
-                    os.rename(old, original)
+                else:
+                    if os.path.isfile(new):
+                        os.rename(new, original)
+                    else:
+                        if os.path.isfile(invalid):
+                            os.rename(invalid, original)
+
             else:
-                os.system('genstrings -q -s "%s" -o "%s" `find "%s" -name "*.swift" -o -name "*.m"`' % (routine, language, path))
-                os.rename(original, old)
-                os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (old, original))
+                os.system(gen_strings_command)
+
+                if os.path.isfile(original):
+                    os.rename(original, old)
+                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (old, original))
+                else:
+                    open(original, 'w')
 
             if os.path.isfile(old):
                 os.remove(old)
@@ -396,7 +436,7 @@ def localize_interface(path, custom_path, development_language_folder):
                      if lang.endswith(LPROJ_EXTENSION) and not lang.endswith(current_language) and os.path.isdir(lang)]
 
         if len(languages) == 0:
-            print('- No Interface %s folder present -\n' % current_language)
+            print('- No Interface folder other than %s present -\n' % current_language)
 
         for language in languages:
             print('+ ' + language)
@@ -407,16 +447,42 @@ def localize_interface(path, custom_path, development_language_folder):
                 original = merged = os.path.join(language, strings_file_name)
                 old = original + '.old'
                 new = original + '.new'
+                invalid = original + '.invalid'
 
                 if os.path.isfile(original): # and not language.endswith(current_language):
-                    os.rename(original, old)
+                    file_type = os.popen('file -b --mime-encoding "%s"' % original).read()
+                    if file_type.startswith('us-ascii') or file_type.startswith('utf'):
+                        os.rename(original, old)
+                    else:
+                        if os.stat(original).st_size == 0:
+                            os.remove(original)
+                        else:
+                            os.rename(original, invalid)
+
                     os.system('ibtool --export-strings-file "%s" "%s"' % (original, ib_file_path))
-                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
-                    merge(merged, old, new, current_language)
+
+                    if os.path.isfile(original):
+                        os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
+                    else:
+                        open(new, 'w')
+
+                    if os.path.isfile(old):
+                        merge(merged, old, new, current_language)
+                    else:
+                        if os.path.isfile(old):
+                            os.rename(new, original)
+                        else:
+                            if os.path.isfile(invalid):
+                                os.rename(invalid, original)
+
                 else:
                     os.system('ibtool --export-strings-file "%s" "%s"' % (original, ib_file_path))
-                    os.rename(original, old)
-                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (old, original))
+
+                    if os.path.isfile(original):
+                        os.rename(original, old)
+                        os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (old, original))
+                    else:
+                        open(original, 'w')
 
                 if os.path.isfile(old):
                     os.remove(old)
