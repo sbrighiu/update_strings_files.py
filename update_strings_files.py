@@ -101,12 +101,10 @@
 # - To change the development language, use -dev="ja" (Japanese).
 # - If the script does not have rights to be executed, run command `chmod +x update_strings_files.py`.
 
-# Version 1.0
-# - If a .lproj folder exists for Localizable.strings, running the script will now always generate an empty file
-#   This eliminates mismatch with xcodeproj when Localizable.strings files are referenced inside the project but
-#   are deleted by the script. This blocks the build phase from being run (Reason: project structure is invalid).
-# - Fix crashes/edge cases when adding or removing strings onto/from an empty or inexistent Localizable.strings file.
-
+# Version 1.0.1
+# - Remove implicit error when untranslated strings.
+# - Add --strict and --nowarn to enable error triggering and ignore warnings.
+# - Remove interface localization to encourage all strings to be added from code.
 
 from sys import argv
 from codecs import open
@@ -115,6 +113,7 @@ from copy import copy
 import os
 
 re_translation = compile(r'^"(.+)" = "(.+)";$')
+left_side_of_translation = compile(r'^"(.+)" = ')
 re_comment_single = compile(r'^/\*.*\*/$')
 re_comment_start = compile(r'^/\*.*$')
 re_comment_end = compile(r'^.*\*/$')
@@ -126,7 +125,9 @@ TEMP_TAG = ''
 SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS = 0
 TEMP_WARNING_DETAILS = ''
 SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS = 0
-DEFAULT_ERROR_DETAILS = ''
+
+DID_INITIALIZE = 0
+IGNORE_WARN = 0
 
 
 class LocalizedString():
@@ -136,6 +137,10 @@ class LocalizedString():
 
     def __unicode__(self):
         return u'%s%s\n' % (u''.join(self.comments), self.translation)
+
+    def update_translation(self):
+        left = left_side_of_translation.match(self.translation).group(0)
+        self.translation = left + '\"%s\"' % self.value + ';\n'
 
 
 class LocalizedFile():
@@ -206,147 +211,158 @@ class LocalizedFile():
 
         f.close()
 
+    def make_all_strings_temporary(self):
+        new_strings = []
+        for string in self.strings:
+            if not string.value.startswith(TEMP_TAG.strip("'").strip('"')):
+                new_string = copy(string)
+                new_string.value = TEMP_TAG.strip("'").strip('"') + new_string.value
+                new_string.update_translation()
+                new_strings.append(new_string)
+                self.strings_d[string.key] = new_string
+        self.strings = new_strings
+
     def merge_with(self, new, final_filename, development_language_folder):
         global SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS
         global TEMP_WARNING_DETAILS
-        global SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS
-        global DEFAULT_ERROR_DETAILS
 
         merged = LocalizedFile()
 
-        total_strings_info = 'string' if len(new.strings) == 1 else 'strings'
-        print('    # ' + str(len(new.strings)) + ' ' + total_strings_info + ' generated')
-        print('    ########################\n')
+        is_dev_language = final_filename.find(development_language_folder) != -1 or final_filename.find('Base.lproj') != -1
 
-        translated_strings = []
         added_strings = []
-        default_strings = []
-        same_comment = 0
+        translated_strings = []
+        temporary_strings = []
         for string in new.strings:
             if string.key not in self.strings_d:
-                added_strings.append(string)
-            else:
-                old_key = self.strings_d[string.key]
-                new_string = copy(old_key)
+                new_string = copy(string)
 
-                same_comment = new_string.comments == string.comments
+                if not is_dev_language:
+                    new_string.value = TEMP_TAG.strip("'").strip('"') + new_string.value
+                    new_string.update_translation()
+                    temporary_strings.append(new_string)
+
+                added_strings.append(new_string)
+                string = new_string
+            else:
+                old = self.strings_d[string.key]
+                new_string = copy(old)
                 new_string.comments = string.comments
 
-                printed = 0
-                if old_key.value != string.value:
-                    if old_key.key != old_key.value:
-                        printed = 1
-                        translated_strings.append(old_key)
-
-                if not printed:
-                    default_strings.append(old_key)
+                if not is_dev_language:
+                    if new_string.value.startswith(TEMP_TAG.strip("'").strip('"')):
+                        temporary_strings.append(new_string)
+                    else:
+                        translated_strings.append(new_string)
+                else:
+                    translated_strings.append(new_string)
 
                 string = new_string
 
             merged.strings.append(string)
             merged.strings_d[string.key] = string
 
-        for oldString in self.strings:
-            found = 0
+        separator = "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+        if is_dev_language:
+            added = len(added_strings)
+            total = len(merged.strings)
+
+            print('  %s' % separator)
+
+            print('  => ' + str(added) + (' string was' if len(added_strings) == 1 else ' strings were') + ' added' \
+                  ' [Total: ' + str(total) + ']')
+            print('  => All strings are automatically marked as translated')
+
+        else:
+            # Show Added/Removed strings print statements
+            show_once = 1
+
             for string in added_strings:
-                if oldString.key == string.key:
-                    found = 1
-                    break
-            for string in default_strings:
-                if oldString.key == string.key:
-                    found = 1
-                    break
-            for string in translated_strings:
-                if oldString.key == string.key:
-                    found = 1
-                    break
-            if not found:
-                print('    - [...Removed] "%s" = "%s"' % (oldString.key, oldString.value))
+                print('    [.....Added] "%s" = "%s"' % (string.key, string.value))
 
-        for string in added_strings:
-            print('    + [.....Added] "%s"' % string.key)
+            for oldString in self.strings:
+                if show_once and len(temporary_strings) > 0:
+                    TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n\n+ %s:\n' % final_filename
+                    show_once = 0
 
-        is_dev_language = final_filename.find(development_language_folder) != -1 or final_filename.find('Base.lproj') != -1
+                found = 0
 
-        if len(default_strings) != 0 and not is_dev_language:
-            DEFAULT_ERROR_DETAILS = DEFAULT_ERROR_DETAILS + '\n\n+ %s:' % final_filename
+                for string in temporary_strings:
+                    if oldString.key == string.key:
+                        data = '"%s" = "%s"' % (string.key, string.value)
+                        TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '    ' + data
 
-        for string in default_strings:
-            data = '"%s" = "%s"' % (string.key, string.value)
+                        print('    [.Temporary] ' + data)
+                        found = 1
+                        break
 
-            if is_dev_language:
-                if not same_comment:
-                    print('    c [..Original] %s' % data)
-                else:
-                    print('    o [..Original] %s' % data)
+                TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n'
 
-            else:
-                SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS = 1
-                DEFAULT_ERROR_DETAILS = DEFAULT_ERROR_DETAILS + '\n  ? %s' % data
+                for string in translated_strings:
+                    if oldString.key == string.key:
+                        print('    [Translated] "%s" = "%s"' % (string.key, string.value))
+                        found = 1
+                        break
+                if not found:
+                    print('    [...Removed] "%s" = "%s"' % (oldString.key, oldString.value))
 
-                if not same_comment:
-                    print('    c [...Default] %s' % data)
-                else:
-                    print('    o [...Default] %s' % data)
+            if len(temporary_strings) != 0:
+                SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS = 1
 
-        temporary_strings = []
+            print('\n  %s' % separator)
 
-        if len(translated_strings) != 0:
-            TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n\n+ %s:' % final_filename
+            translated = len(translated_strings)
+            total = len(merged.strings)
+            left = total-translated
+            percentage = int(translated*100/total) if total != 0 else 0
+            temporary = len(temporary_strings)
+            temporary_total = total
+            percentage_temporary = int(temporary*100/temporary_total) if temporary_total != 0 else 0
+            extra = '' if percentage == 100 else ('  => ' + str(left) + ' more ' + ('string' if left == 1 else 'strings') + ' left to translate')
+            conjugation = 'has' if translated == 1 else 'have'
 
-        for string in translated_strings:
-            if string.value.startswith(TEMP_TAG):
-                temporary_strings.append(string)
-                data = '"%s\" = "%s\"' % (string.key, string.value)
-                output = '    t [.Temporary] %s' % data
-                TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n  ? %s' % data
-                print(output)
-            else:
-                print('    . [Translated] "%s" = "%s"' % (string.key, string.value))
+            extra_temp_part = ' but ' + str(percentage_temporary) + '% are still temporary strings' if percentage_temporary != 0 else ''
 
-        if len(temporary_strings) != 0:
-            SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS = 1
+            print('  => ' + str(translated) + ' ' + ('string' if translated == 1 else 'strings') + ' ' + conjugation +
+                  ' been translated [Total: ' + str(total) + ']')
+            print('  => ' + str(percentage) + '% of all strings were translated' + extra_temp_part)
+            print(extra) if len(extra) != 0 else []
 
-        print('\n  ^^^^^^^^^^^^^^^^^^^^^^^^^')
-
-        translated = len(translated_strings)
-        true_translated = len(translated_strings) - len(temporary_strings)
-        total = len(new.strings)
-        left = total-true_translated
-        percentage = int(translated*100/total) if total != 0 else 0
-        temporary = len(temporary_strings)
-        temporary_total = len(new.strings)
-        percentage_temporary = int(temporary*100/temporary_total) if temporary_total != 0 else 0
-        extra = '' if percentage == 100 else ('  => ' + str(left) + ' more ' + ('string' if left == 1 else 'strings') + ' left to translate')
-        conjugation = 'has' if true_translated == 1 else 'have'
-
-        extra_temp_part = ' but ' + str(percentage_temporary) + '% are still temporary strings' if percentage_temporary != 0 else ''
-
-        print('  => ' + str(true_translated) + ' ' + ('string' if true_translated == 1 else 'strings') + ' ' + conjugation +
-              ' been translated [Total: ' + str(total) + ']')
-        print('  => ' + str(percentage) + '% of all strings were translated' + extra_temp_part)
-        print(extra) if len(extra) != 0 else []
-
+        print('\n')
         return merged
 
 
 def merge(merged_fname, old_fname, new_fname, development_language_folder):
+    old = None
     try:
         old = LocalizedFile(old_fname, auto_read=True)
     except:
-        pass
+        old = LocalizedFile()
 
     new = LocalizedFile(new_fname, auto_read=True)
     merged = old.merge_with(new, merged_fname, development_language_folder)
     merged.save_to_file(merged_fname)
 
 
-def localize_code(path, customPath, routine, development_language_folder):
+def initialize_file_from(fname, new_fname, development_language_folder):
+    is_dev_language = new_fname.find(development_language_folder) != -1 or new_fname.find('Base.lproj') != -1
+    if not is_dev_language:
+        new = LocalizedFile(fname, auto_read=True)
+        new.make_all_strings_temporary()
+        new.save_to_file(new_fname)
+    else:
+        os.rename(fname, new_fname)
+
+
+def localize_code(rawPath, customPath, routine, development_language_folder):
+    global DID_INITIALIZE
+    global IGNORE_WARN
+
+    path = rawPath
     if customPath:
         path = os.path.join(path, customPath)
 
     try:
-        print('----- Localizing source code at path ' + path + ' -----')
         languages = [lang for lang in [os.path.join(path, name) for name in os.listdir(path)]
                      if lang.endswith(LPROJ_EXTENSION) and os.path.isdir(lang)]
 
@@ -354,14 +370,12 @@ def localize_code(path, customPath, routine, development_language_folder):
             print('- No *.lproj folders detected -\n')
 
         for language in languages:
-            print('+ ' + language)
+            print('+ ' + language + '/' + STRINGS_FILE + '\n')
 
             original = merged = os.path.join(language, STRINGS_FILE)
             old = original + '.old'
             new = original + '.new'
             invalid = original + '.invalid'
-
-            print('  - ' + STRINGS_FILE)
 
             # Clean junk files
             if os.path.isfile(old):
@@ -398,11 +412,15 @@ def localize_code(path, customPath, routine, development_language_folder):
                             os.rename(invalid, original)
 
             else:
+                DID_INITIALIZE = 1
                 os.system(gen_strings_command)
 
+                print('    Generated a new Localizable.strings file from source code.')
+
                 if os.path.isfile(original):
-                    os.rename(original, old)
-                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (old, original))
+                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, old))
+                    initialize_file_from(old, new, development_language)
+                    os.rename(new, original)
                 else:
                     open(original, 'w')
 
@@ -411,91 +429,11 @@ def localize_code(path, customPath, routine, development_language_folder):
             if os.path.isfile(new):
                 os.remove(new)
 
-            print('~ Finished successfully ~\n')
     except:
         print('- No language folders present -\n')
 
 
-def localize_interface(path, custom_path, development_language_folder):
-    if custom_path:
-        path = os.path.join(path, custom_path)
-
-    base_language = 'Base.lproj'
-    current_language = base_language
-    base_dir = os.path.join(path, current_language)
-
-    # This will be executed if the project does not use Base.lproj
-    if not os.path.isdir(base_dir):
-        current_language = development_language_folder
-        base_dir = os.path.join(path, current_language)
-
-    print('----- Localizing interface at path ' + path + ' -----')
-    if os.path.isdir(base_dir):
-        ib_file_names = [name for name in os.listdir(base_dir) if name.endswith('.storyboard') or name.endswith('.xib')]
-        languages = [lang for lang in [os.path.join(path, name) for name in os.listdir(path)]
-                     if lang.endswith(LPROJ_EXTENSION) and not lang.endswith(current_language) and os.path.isdir(lang)]
-
-        if len(languages) == 0:
-            print('- No Interface folder other than %s present -\n' % current_language)
-
-        for language in languages:
-            print('+ ' + language)
-            for ibFileName in ib_file_names:
-                ib_file_path = os.path.join(base_dir, ibFileName)
-                strings_file_name = os.path.splitext(ibFileName)[0] + '.strings'
-                print('  - ' + strings_file_name)
-                original = merged = os.path.join(language, strings_file_name)
-                old = original + '.old'
-                new = original + '.new'
-                invalid = original + '.invalid'
-
-                if os.path.isfile(original): # and not language.endswith(current_language):
-                    file_type = os.popen('file -b --mime-encoding "%s"' % original).read()
-                    if file_type.startswith('us-ascii') or file_type.startswith('utf'):
-                        os.rename(original, old)
-                    else:
-                        if os.stat(original).st_size == 0:
-                            os.remove(original)
-                        else:
-                            os.rename(original, invalid)
-
-                    os.system('ibtool --export-strings-file "%s" "%s"' % (original, ib_file_path))
-
-                    if os.path.isfile(original):
-                        os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
-                    else:
-                        open(new, 'w')
-
-                    if os.path.isfile(old):
-                        merge(merged, old, new, current_language)
-                    else:
-                        if os.path.isfile(old):
-                            os.rename(new, original)
-                        else:
-                            if os.path.isfile(invalid):
-                                os.rename(invalid, original)
-
-                else:
-                    os.system('ibtool --export-strings-file "%s" "%s"' % (original, ib_file_path))
-
-                    if os.path.isfile(original):
-                        os.rename(original, old)
-                        os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (old, original))
-                    else:
-                        open(original, 'w')
-
-                if os.path.isfile(old):
-                    os.remove(old)
-                if os.path.isfile(new):
-                    os.remove(new)
-
-            print('~ Finished successfully ~\n')
-    else:
-        print('- No %s folder detected -\n' % current_language)
-
-
 if __name__ == '__main__':
-
     # Check for Python 3+
     print('Executed with: ')
     python_installed = os.system('python3 --version') == 0
@@ -508,22 +446,24 @@ if __name__ == '__main__':
 
     print('\n')
 
+    help_text = 'Please use only the following arguments and syntax:\n' \
+                'Usage: %s\n' \
+                '          -src=path_to_source_directory\n' \
+                '          -tag=[temporary_string_tag]\n' \
+                '          --strict\n' \
+                '          --nowarn\n' \
+                '          -rou=[routine]\n' \
+                '          -dev=[development_language]\n' \
+                'Please make sure to use \"\" for the argument values.\n' \
+                'For warnings to be treated as errors, add --strict.' % argv[0]
+
     argc = len(argv)
     if argc < 1 or 6 < argc:
-        print('Please use only the following arguments and syntax:\n' +
-              'Usage: %s\n' % argv[0] +
-              '          -src=path_to_source_directory\n' +
-              '          -int=[directories_for_interface_files_separated_by_comma]\n' +
-              '          -tag=[temporary_string_tag]\n' +
-              '          -rou=[routine]\n' +
-              '          -dev=[development_language]\n' +
-              'Please make sure to use \"\" for the argument values.\n' +
-              'For not interface projects, add -int=\"-\".')
+        print(help_text)
         quit(-2)
 
     path = '.'
-    directories_for_interface_files = ''
-    TEMP_TAG = '*'
+    TEMP_TAG = '*'.strip("'").strip('"')
     routine = 'NSLocalizedString'
     development_language = 'en'
 
@@ -535,16 +475,17 @@ if __name__ == '__main__':
             if value != '':
                 path = value
                 continue
-        if arg.startswith('-int='):
-            value = arg[5:]
-            if value != '':
-                directories_for_interface_files = value
-                continue
         if arg.startswith('-tag='):
             value = arg[5:]
             if value != '':
-                TEMP_TAG = value
+                TEMP_TAG = value.strip("'").strip('"')
                 continue
+        if arg.startswith('--strict'):
+            SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS = 1
+            continue
+        if arg.startswith('--nowarn'):
+            IGNORE_WARN = 1
+            continue
         if arg.startswith('-rou='):
             value = arg[5:]
             if value != '':
@@ -555,15 +496,7 @@ if __name__ == '__main__':
             if value != '':
                 development_language = value
                 continue
-        print('Please use only the following arguments and syntax:\n' +
-              'Usage: %s\n' % argv[0] +
-              '          -src=path_to_source_directory\n' +
-              '          -int=[directories_for_interface_files_separated_by_comma]\n' +
-              '          -tag=[temporary_string_tag]\n' +
-              '          -rou=[routine]\n' +
-              '          -dev=[development_language]\n' +
-              'Please make sure to use \"\" for the argument values.\n' +
-              'For not interface projects, add -int=\"-\".')
+        print(help_text)
         quit(-3)
 
     development_language_folder = os.path.splitext(development_language)[0] + LPROJ_EXTENSION
@@ -571,19 +504,16 @@ if __name__ == '__main__':
     # Configure these paths to cover all your coding needs
     localize_code(path, '', routine, development_language_folder)
 
-    if directories_for_interface_files != '-':
-        for extra_directory in directories_for_interface_files.split(','):
-            localize_interface(path, extra_directory, development_language_folder)
+    info_for_temp_tag = '(strings prefixed with \'' + TEMP_TAG + '\')'
+    if (not DID_INITIALIZE) and SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS and SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS:
+        print('----- Xcode error -----')
+        os.system('echo "error: You have strings that are not translated! Replace all temporary strings ' + info_for_temp_tag +
+                  ' and add translated ones to be able to build the project without errors.%s"' % TEMP_WARNING_DETAILS)
+        quit(-4)
 
-    if SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS:
+    should_take_warn_into_account = (not IGNORE_WARN) and SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS
+    if should_take_warn_into_account:
         print('----- Xcode warning -----')
         os.system('echo "warning: There are string keys which need to be translated.%s"' % TEMP_WARNING_DETAILS)
-
-    info_for_temp_tag = '(prefix their value with \'' + TEMP_TAG + '\')'
-    if SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS:
-        print('----- Xcode error -----')
-        os.system('echo "error: You have strings that are not translated! Replace them with temporary strings ' + info_for_temp_tag +
-                  ' or add translated ones to be able to build the project.%s"' % DEFAULT_ERROR_DETAILS)
-        quit(-4)
 
     print('\n')
