@@ -278,36 +278,41 @@ class LocalizedFile():
             show_once = 1
 
             for string in added_strings:
-                print('    [.....Added] "%s" = "%s"' % (string.key, string.value))
-
-            for oldString in self.strings:
-                if show_once and len(temporary_strings) > 0:
-                    TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n\n+ %s:\n' % final_filename
-                    show_once = 0
-
-                found = 0
-
-                for string in temporary_strings:
-                    if oldString.key == string.key:
-                        data = '"%s" = "%s"' % (string.key, string.value)
-                        TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '    ' + data
-
-                        print('    [.Temporary] ' + data)
-                        found = 1
-                        break
-
-                TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n'
-
-                for string in translated_strings:
-                    if oldString.key == string.key:
-                        print('    [Translated] "%s" = "%s"' % (string.key, string.value))
-                        found = 1
-                        break
-                if not found:
-                    print('    [...Removed] "%s" = "%s"' % (oldString.key, oldString.value))
+                print('    [.....Added] "%s" = "%s"' % (string.key.encode('utf-8', errors='ignore'), string.value.encode('utf-8', errors='ignore')))
 
             if len(temporary_strings) != 0:
                 SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS = 1
+
+            for oldString in self.strings:
+                try:
+                    if show_once and len(temporary_strings) > 0:
+                        TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n\n+ %s:\n' % final_filename.encode('utf-8', errors='ignore')
+                        show_once = 0
+
+                    found = 0
+
+                    for string in temporary_strings:
+                        if oldString.key == string.key:
+                            data = '"%s" = "%s"' % (string.key.encode('utf-8', errors='ignore'), string.value.encode('utf-8', errors='ignore'))
+                            TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '    ' + data.encode('utf-8', errors='ignore')
+
+                            print('    [.Temporary] ' + data.encode('utf-8', errors='ignore'))
+                            found = 1
+                            break
+
+                    TEMP_WARNING_DETAILS = TEMP_WARNING_DETAILS + '\n'
+
+                    for string in translated_strings:
+                        if oldString.key == string.key:
+                            print('    [Translated] "%s" = "%s"' % (string.key.encode('utf-8', errors='ignore'), string.value.encode('utf-8', errors='ignore')))
+                            found = 1
+                            break
+                    if not found:
+                        print('    [...Removed] "%s" = "%s"' % (oldString.key.encode('utf-8', errors='ignore'), oldString.value.encode('utf-8', errors='ignore')))
+
+                except Exception as e:
+                    print('Failed to print string. Error: ' + str(e))
+                    quit(-404)
 
             print('\n  %s' % separator)
 
@@ -368,6 +373,7 @@ def localize_code(rawPath, customPath, routine, development_language_folder):
 
         if len(languages) == 0:
             print('- No *.lproj folders detected -\n')
+            quit(-253)
 
         for language in languages:
             print('+ ' + language + '/' + STRINGS_FILE + '\n')
@@ -377,60 +383,80 @@ def localize_code(rawPath, customPath, routine, development_language_folder):
             new = original + '.new'
             invalid = original + '.invalid'
 
-            # Clean junk files
-            if os.path.isfile(old):
-                os.remove(old)
-            if os.path.isfile(new):
-                os.remove(new)
-
-            gen_strings_command = 'find "%s" -type f -name "*.swift" -print0 -or -name "*.m" -print0' \
-                                  ' | tr "\n" "\t" | xargs -0 xcrun extractLocStrings -q -s "%s" -o "%s"' % (path, routine, language)
-            if os.path.isfile(original):
-                file_type = os.popen('file -b --mime-encoding "%s"' % original).read()
-                if file_type.startswith('us-ascii') or file_type.startswith('utf'):
-                    os.rename(original, old)
-                else:
-                    if os.stat(original).st_size == 0:
-                        os.remove(original)
-                    else:
-                        os.rename(original, invalid)
-
-                os.system(gen_strings_command)
-
-                if os.path.isfile(original):
-                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
-                else:
-                    open(new, 'w')
-
+            try:
+                # Clean junk files
                 if os.path.isfile(old):
-                    merge(merged, old, new, development_language)
+                    os.remove(old)
+                if os.path.isfile(new):
+                    os.remove(new)
+
+                gen_strings_command = 'find "%s" -type f -name "*.swift" -print0 -or -name "*.m" -print0' \
+                                      ' | tr "\n" "\t" | xargs -0 xcrun extractLocStrings -q -s "%s" -o "%s"' % (path, routine, language)
+                if os.path.isfile(original):
+                    file_type = os.popen('file -b --mime-encoding "%s"' % original).read()
+                    if file_type.startswith('us-ascii') or file_type.startswith('utf'):
+                        os.rename(original, old)
+                    else:
+                        if os.stat(original).st_size == 0:
+                            os.remove(original)
+                        else:
+                            os.rename(original, invalid)
+
+                    os.system(gen_strings_command)
+
+                    if os.path.isfile(original):
+                        os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, new))
+                    else:
+                        open(new, 'w')
+
+                    if os.path.isfile(old):
+                        try:
+                            merge(merged, old, new, development_language)
+
+                        except Exception as e:
+                            print('Failed merging files with error ' + str(e))
+
+                            if os.path.isfile(original):
+                                os.remove(original)
+                            if os.path.isfile(new):
+                                os.remove(new)
+                            os.rename(old, original)
+
+                            quit(-254)
+
+                    else:
+                        if os.path.isfile(new):
+                            os.rename(new, original)
+                        else:
+                            if os.path.isfile(invalid):
+                                os.rename(invalid, original)
+
                 else:
-                    if os.path.isfile(new):
+                    DID_INITIALIZE = 1
+                    os.system(gen_strings_command)
+
+                    print('    Generated a new Localizable.strings file from source code.')
+
+                    if os.path.isfile(original):
+                        os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, old))
+                        initialize_file_from(old, new, development_language)
                         os.rename(new, original)
                     else:
-                        if os.path.isfile(invalid):
-                            os.rename(invalid, original)
+                        open(original, 'w')
 
-            else:
-                DID_INITIALIZE = 1
-                os.system(gen_strings_command)
+                if os.path.isfile(old):
+                    os.remove(old)
+                if os.path.isfile(new):
+                    os.remove(new)
 
-                print('    Generated a new Localizable.strings file from source code.')
+            except Exception as e:
+                print('Failed processing files with error ' + str(e))
 
-                if os.path.isfile(original):
-                    os.system('iconv -f UTF-16 -t UTF-8 "%s" > "%s"' % (original, old))
-                    initialize_file_from(old, new, development_language)
-                    os.rename(new, original)
-                else:
-                    open(original, 'w')
-
-            if os.path.isfile(old):
-                os.remove(old)
-            if os.path.isfile(new):
-                os.remove(new)
+                quit(-254)
 
     except:
         print('- No language folders present -\n')
+        quit(-255)
 
 
 if __name__ == '__main__':
@@ -504,16 +530,16 @@ if __name__ == '__main__':
     # Configure these paths to cover all your coding needs
     localize_code(path, '', routine, development_language_folder)
 
-    info_for_temp_tag = '(strings prefixed with \'' + TEMP_TAG + '\')'
+    info_for_temp_tag = '(strings prefixed with \'' + TEMP_TAG.encode('utf-8', errors='ignore') + '\')'
     if (not DID_INITIALIZE) and SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS and SHOULD_TRIGGER_ERROR_BECAUSE_OF_DEFAULT_STRINGS:
         print('----- Xcode error -----')
-        os.system('echo "error: You have strings that are not translated! Replace all temporary strings ' + info_for_temp_tag +
-                  ' and add translated ones to be able to build the project without errors.%s"' % TEMP_WARNING_DETAILS)
+        os.system('echo "error: You have strings that are not translated! Replace all temporary strings ' + info_for_temp_tag.encode('utf-8', errors='ignore') +
+                  ' and add translated ones to be able to build the project without errors.%s"' % TEMP_WARNING_DETAILS.encode('utf-8', errors='ignore'))
         quit(-4)
 
     should_take_warn_into_account = (not IGNORE_WARN) and SHOULD_TRIGGER_WARNING_BECAUSE_OF_TEMP_STRINGS
     if should_take_warn_into_account:
         print('----- Xcode warning -----')
-        os.system('echo "warning: There are string keys which need to be translated.%s"' % TEMP_WARNING_DETAILS)
+        os.system('echo "warning: There are string keys which need to be translated.%s"' % TEMP_WARNING_DETAILS.encode('utf-8', errors='ignore'))
 
     print('\n')
